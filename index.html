@@ -503,6 +503,197 @@ input[type="range"].ana-slider::-webkit-slider-thumb:active{transform:scale(1.15
 }
 .btn-sair:active{border-color:var(--danger);color:var(--danger)}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const SUPA_URL = 'https://cvwavdrewbgpfkcibbam.supabase.co'
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2d2F2ZHJld2JncGZrY2liYmFtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5Njk0NTMsImV4cCI6MjA5MjU0NTQ1M30.3CXPRUXUXpe9d_WXXqfwgdSTaYOjSXz-8lpQYzgrjlc'
+const supa = supabase.createClient(SUPA_URL, SUPA_KEY)
+
+// ── AUTH STATE ────────────────────────────────
+let currentUser = null
+
+async function initAuth(){
+  const { data } = await supa.auth.getSession()
+  currentUser = data.session?.user || null
+  const nav = document.getElementById('bottom-nav')
+  if(nav) nav.style.display='none'
+  if(currentUser){
+    await enterAppSupabase(false)
+  } else {
+    SS('screen-login')
+  }
+}
+
+// ── REGISTER ──────────────────────────────────
+async function doRegister(){
+  clr()
+  const email = $('up-email').value.trim()
+  const pass  = $('up-pass').value
+  const pass2 = $('up-pass2').value
+  let ok = true
+  if(!vem(email)){ er('up-email-err'); ok=false }
+  if(pass.length<6){ er('up-pass-err'); ok=false }
+  if(pass!==pass2){ er('up-pass2-err'); ok=false }
+  if(!ok) return
+
+  const btn = document.querySelector('#panel-up .btn-enter')
+  if(btn) btn.textContent = 'Criando conta...'
+
+  const { data, error } = await supa.auth.signUp({ email, password:pass })
+  if(error){
+    er('up-email-err', error.message === 'User already registered' ? 'E-mail ja cadastrado.' : error.message)
+    if(btn) btn.textContent = 'Criar conta'
+    return
+  }
+  currentUser = data.user
+  // cria perfil inicial
+  await supa.from('profiles').insert({ id:currentUser.id, display_name:nameFromEmail(email), has_anamnese:false })
+  if(btn) btn.textContent = 'Criar conta'
+  await enterAppSupabase(true)
+}
+
+// ── LOGIN ─────────────────────────────────────
+async function doLogin(){
+  clr()
+  const email = $('in-email').value.trim()
+  const pass  = $('in-pass').value
+  let ok = true
+  if(!vem(email)){ er('in-email-err'); ok=false }
+  if(!pass){ er('in-pass-err','Informe sua senha.'); ok=false }
+  if(!ok) return
+
+  const btn = document.querySelector('#panel-in .btn-enter')
+  if(btn) btn.textContent = 'Entrando...'
+
+  const { data, error } = await supa.auth.signInWithPassword({ email, password:pass })
+  if(error){
+    er('in-pass-err', 'Dados incorretos. Tente novamente.')
+    if(btn) btn.textContent = 'Entrar'
+    return
+  }
+  currentUser = data.user
+  if(btn) btn.textContent = 'Entrar'
+  await enterAppSupabase(false)
+}
+
+// ── LOGOUT ────────────────────────────────────
+async function doLogout(){
+  await supa.auth.signOut()
+  currentUser = null
+  $('in-email').value=''; $('in-pass').value=''; clr()
+  if(typeof hideAppNav==='function') hideAppNav()
+  SS('screen-login')
+}
+
+// ── ENTER APP ─────────────────────────────────
+async function enterAppSupabase(isFirst){
+  if(!currentUser) return
+
+  // busca perfil
+  const { data:profile } = await supa.from('profiles').select('*').eq('id', currentUser.id).single()
+  const name = profile?.display_name || nameFromEmail(currentUser.email||'')
+
+  $('wname').textContent = name
+  if($('home-name')) $('home-name').textContent = name
+
+  if(isFirst){
+    SS('screen-home')
+    $('modal-welcome').classList.add('on')
+    if(typeof hideAppNav==='function') hideAppNav()
+    return
+  }
+
+  if(!profile?.has_anamnese){
+    // carrega anamnese salva parcialmente se existir
+    const saved = profile?.anamnese || {}
+    anaData = saved; anaStep = 0; renderAnaStep()
+    SS('screen-anamnese')
+    if(typeof hideAppNav==='function') hideAppNav()
+    return
+  }
+
+  // carrega plano existente
+  const { data:planRow } = await supa.from('training_plans').select('plan_data').eq('user_id', currentUser.id).order('created_at', {ascending:false}).limit(1).single()
+
+  if(planRow?.plan_data){
+    currentPlan = JSON.parse(JSON.stringify(planRow.plan_data), (key, val) => {
+      if(key === 'date' && typeof val === 'string') return new Date(val)
+      return val
+    })
+  } else if(profile?.anamnese){
+    try{
+      currentPlan = generatePlan(profile.anamnese)
+      await supa.from('training_plans').insert({ user_id:currentUser.id, plan_data:JSON.parse(JSON.stringify(currentPlan)) })
+    } catch(e){ console.error(e) }
+  }
+
+  if(!currentPlan){
+    SS('screen-anamnese'); anaStep=0; renderAnaStep()
+    if(typeof hideAppNav==='function') hideAppNav(); return
+  }
+
+  if(typeof showAppNav==='function') showAppNav()
+  if(typeof renderInicio==='function') renderInicio()
+  SS('screen-inicio')
+}
+
+// ── SALVAR ANAMNESE ───────────────────────────
+async function saveAnaToSupabase(anaObj){
+  if(!currentUser) return
+  await supa.from('profiles').update({ anamnese: anaObj }).eq('id', currentUser.id)
+}
+
+// ── FINALIZAR ANAMNESE ────────────────────────
+async function finishAnamneseSupabase(anaObj){
+  if(!currentUser) return
+  $('loading').classList.add('on')
+
+  await supa.from('profiles').update({
+    anamnese: anaObj,
+    has_anamnese: true,
+    display_name: anaObj.name || nameFromEmail(currentUser.email||'')
+  }).eq('id', currentUser.id)
+
+  try{
+    currentPlan = generatePlan(anaObj)
+    await supa.from('training_plans').insert({ user_id:currentUser.id, plan_data:JSON.parse(JSON.stringify(currentPlan)) })
+  } catch(e){ console.error(e) }
+
+  setTimeout(()=>{
+    $('loading').classList.remove('on')
+    if(!currentPlan){ SS('screen-anamnese'); return }
+    if(typeof showAppNav==='function') showAppNav()
+    if(typeof renderInicio==='function') renderInicio()
+    SS('screen-inicio')
+  }, 2200)
+}
+
+// ── COMPLETED SESSIONS ────────────────────────
+async function getCompletedIds(){
+  if(!currentUser) return []
+  const { data } = await supa.from('completed_sessions').select('session_id').eq('user_id', currentUser.id)
+  return (data||[]).map(r => r.session_id)
+}
+
+async function markSessionComplete(sessionId){
+  if(!currentUser) return
+  const existing = await getCompletedIds()
+  if(existing.includes(sessionId)) return
+  await supa.from('completed_sessions').insert({ user_id:currentUser.id, session_id:sessionId })
+}
+
+async function saveFeedbackSupabase(sessionId, diff, legs, comment, exStates){
+  if(!currentUser) return
+  await supa.from('feedbacks').insert({
+    user_id:currentUser.id,
+    session_id:sessionId,
+    difficulty:diff,
+    legs_feeling:legs,
+    comment,
+    ex_states:exStates
+  })
+}
+</script>
 </head>
 <body>
 
@@ -677,7 +868,10 @@ const SSess = e  => localStorage.setItem('pu_session',e)
 const CSess = () => localStorage.removeItem('pu_session')
 const h   = s  => { let n=0; for(const c of s){n=(n<<5)-n+c.charCodeAt(0);n|=0} return String(n) }
 const GAna  = () => JSON.parse(localStorage.getItem('pu_anamnese')||'{}')
-const SAna  = d  => localStorage.setItem('pu_anamnese',JSON.stringify(d))
+const SAna  = d  => {
+  localStorage.setItem('pu_anamnese',JSON.stringify(d))
+  if(typeof saveAnaToSupabase === 'function') saveAnaToSupabase(d)
+}
 
 // ─── AUTH ─────────────────────────────────────────────────────
 function doRegister(){
@@ -972,7 +1166,8 @@ function finishAnamnese(){
 ;(function(){
   const nav = document.getElementById('bottom-nav')
   if(nav) nav.style.display='none'
-  if(GSess()) enterApp(false)
+  // Supabase initAuth handles session restore
+  if(typeof initAuth === 'function') initAuth()
   else SS('screen-login')
 })()
 </script>
@@ -1983,16 +2178,7 @@ function launchApp(){
 
 // sobrescreve finishAnamnese para chamar launchApp
 window.finishAnamnese = function(){
-  $('loading').classList.add('on')
-  const users = GU()
-  const email = GSess()
-  const user  = users.find(u => u.email === email)
-  if(user){ user.hasAnamnese = true; SU(users) }
-
-  setTimeout(()=>{
-    $('loading').classList.remove('on')
-    launchApp()
-  }, 2800)
+  finishAnamneseSupabase(anaData)
 }
 
 // sobrescreve enterApp para checar se tem plano
@@ -2021,9 +2207,8 @@ window.enterApp = function(isFirst){
 
 window.closeWelcome = function(){
   $('modal-welcome').classList.remove('on')
-  const ana = GAna()
-  if(!ana?.goal_km){ SS('screen-anamnese'); anaStep=0; anaData={}; renderAnaStep(); hideAppNav() }
-  else launchApp()
+  anaData = {}; anaStep = 0; renderAnaStep()
+  SS('screen-anamnese'); if(typeof hideAppNav==='function') hideAppNav()
 }
 </script>
 
@@ -2735,12 +2920,14 @@ function saveFeedback(){
   if(activeWorkoutId && !completed.includes(activeWorkoutId)){
     completed.push(activeWorkoutId)
     localStorage.setItem('pu_completed', JSON.stringify(completed))
+    if(typeof markSessionComplete==='function') markSessionComplete(activeWorkoutId)
   }
 
   // salva feedback
   const feedbacks = JSON.parse(localStorage.getItem('pu_feedbacks')||'[]')
   feedbacks.push({ sessionId:activeWorkoutId, diff, legs, comment, date:new Date().toISOString(), exStates })
   localStorage.setItem('pu_feedbacks', JSON.stringify(feedbacks))
+  if(typeof saveFeedbackSupabase==='function') saveFeedbackSupabase(activeWorkoutId, diff, legs, comment, exStates)
 
   $('modal-feedback').classList.remove('on')
 
